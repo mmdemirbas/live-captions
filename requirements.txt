@@ -1,0 +1,8 @@
+faster-whisper==1.2.0  # Whisper model for transcription
+sounddevice==0.4.6     # Sound device for audio input/output
+webrtcvad==2.0.10      # WebRTC Voice Activity Detection for detecting speech in audio
+scipy==1.13.0          # Quick audio resampling
+
+# macOS ships Python’s ssl module against LibreSSL 2.8.3. urllib3 v2 warns that some modern TLS features are missing.
+# Nothing in this project performs HTTPS requests, so safely ignore the warning or pin it urllib3 < 2
+urllib3==1.26.16
