@@ -5,4 +5,4 @@ scipy==1.13.0          # Quick audio resampling
 
 # macOS ships Python’s ssl module against LibreSSL 2.8.3. urllib3 v2 warns that some modern TLS features are missing.
 # Nothing in this project performs HTTPS requests, so safely ignore the warning or pin it urllib3 < 2
-urllib3==1.26.16
+urllib3==2.5.0
