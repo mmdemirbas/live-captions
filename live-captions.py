@@ -2,7 +2,8 @@
 import argparse, queue, sys, time, sounddevice as sd
 from faster_whisper import WhisperModel
 import webrtcvad, numpy as np
-import scipy.signal
+import signal
+import scipy
 from collections import deque
 
 mic_device_name = "MacBook Pro Microphone"
@@ -22,7 +23,7 @@ def main():
     default_speech_threshold = 2
     default_end_silence = 300
 
-    p = argparse.ArgumentParser("Live captions from mic or system audio.")
+    p = argparse.ArgumentParser(description="Live captions from mic or system audio.")
     p.add_argument("--source", type=str, help="mic | system | device index")
     p.add_argument("--profile", choices=["realtime", "optimized", "default", "accurate"],
                    help="Tune latency vs accuracy")
@@ -212,69 +213,87 @@ def main():
 
         print("Listening... Press Ctrl+C to stop.")
         while True:
-            # Gather exactly one 30 ms frame worth of bytes
-            while len(buf) < frame_bytes_dev:
-                buf.extend(q.get())
+            try:
+                # Gather exactly one 30 ms frame worth of bytes
+                while len(buf) < frame_bytes_dev:
+                    buf.extend(q.get())
 
-            frame_dev = bytes(buf[:frame_bytes_dev])
-            del buf[:frame_bytes_dev]
+                frame_dev = bytes(buf[:frame_bytes_dev])
+                del buf[:frame_bytes_dev]
 
-            # Resample this frame to 16 kHz for VAD and model
-            frame_16k = resample_16k_int16(frame_dev)
-            voiced = is_voiced_30ms_16k(frame_16k)
+                # Resample this frame to 16 kHz for VAD and model
+                frame_16k = resample_16k_int16(frame_dev)
+                voiced = is_voiced_30ms_16k(frame_16k)
 
-            if not in_speech:
-                # Keep rolling lookback
-                lookback_16k.append(frame_16k)
-                if voiced:
-                    # Enter speech: prepend lookback for breathing room/context
-                    in_speech = True
-                    silence_frames = 0
-                    current_segment_16k = list(lookback_16k)  # shallow copy of frames
-                # otherwise remain idle
-            else:
-                if voiced:
-                    current_segment_16k.append(frame_16k)
-                    silence_frames = 0
-                    trailing_tail_needed = tail_frames
-                else:
-                    silence_frames += 1
-                    # Add a few silent frames as tail padding (to avoid cutting consonants)
-                    if trailing_tail_needed > 0:
-                        current_segment_16k.append(frame_16k)
-                        trailing_tail_needed -= 1
-
-                    if silence_frames * frame_ms >= args.end_silence:
-                        # Finalize segment
-                        if current_segment_16k:
-                            seg = np.concatenate(current_segment_16k, axis=0).astype(np.float32)
-                            # Transcribe finalized segment
-                            # For better accuracy: small beam; temperature 0 for determinism
-                            segments, _ = model.transcribe(
-                                seg,
-                                beam_size=beam_size,
-                                temperature=0.0,
-                                vad_filter=False,  # already VAD'd
-                                word_timestamps=False,
-                            )
-                            if args.timestamps:
-                                now_ts = time.strftime("%H:%M:%S")
-                                for s in segments:
-                                    print(f"[{now_ts}] {s.text}", flush=True)
-                            else:
-                                for s in segments:
-                                    print(s.text, flush=True)
-
-                        # Reset state
-                        in_speech = False
+                if not in_speech:
+                    # Keep rolling lookback
+                    lookback_16k.append(frame_16k)
+                    if voiced:
+                        # Enter speech: prepend lookback for breathing room/context
+                        in_speech = True
                         silence_frames = 0
-                        current_segment_16k = []
-                        lookback_16k.clear()
+                        current_segment_16k = list(lookback_16k)  # shallow copy of frames
+                        # otherwise remain idle
+                else:
+                    if voiced:
+                        current_segment_16k.append(frame_16k)
+                        silence_frames = 0
+                        trailing_tail_needed = tail_frames
+                    else:
+                        silence_frames += 1
+                        # Add a few silent frames as tail padding (to avoid cutting consonants)
+                        if trailing_tail_needed > 0:
+                            current_segment_16k.append(frame_16k)
+                            trailing_tail_needed -= 1
 
-            # Keep prompt responsive (flush heartbeat)
-            if time.time() - last_print > 5:
-                print("", flush=True)
-                last_print = time.time()
+                        if silence_frames * frame_ms >= args.end_silence:
+                            # Finalize segment
+                            if current_segment_16k:
+                                seg = np.concatenate(current_segment_16k, axis=0).astype(np.float32)
+                                try:
+                                    # Transcribe finalized segment
+                                    # For better accuracy: small beam; temperature 0 for determinism
+                                    segments, _ = model.transcribe(
+                                        seg,
+                                        beam_size=beam_size,
+                                        temperature=0.0,
+                                        vad_filter=False,
+                                        word_timestamps=False,
+                                    )
+                                    if args.timestamps:
+                                        now_ts = time.strftime("%H:%M:%S")
+                                        for s in segments:
+                                            print(f"[{now_ts}] {s.text}", flush=True)
+                                    else:
+                                        for s in segments:
+                                            print(s.text, flush=True)
+                                except KeyboardInterrupt:
+                                    # Gracefully abort an in-flight decode
+                                    print("\nStopping...", flush=True)
+                                    return
+
+                            # Reset state
+                            in_speech = False
+                            silence_frames = 0
+                            current_segment_16k = []
+                            lookback_16k.clear()
+
+                # Keep prompt responsive (flush heartbeat)
+                if time.time() - last_print > 5:
+                    print("", flush=True)
+                    last_print = time.time()
+
+            except KeyboardInterrupt:
+                print("\nStopping...", flush=True)
+                return
 
 
-if __name__ == "__main__": main()
+if __name__ == "__main__":
+    try:
+        # Optional: ignore SIGINT default handler so we only handle it here
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+        main()
+    except KeyboardInterrupt:
+        # Final catch-all to avoid stack traces from deep inside libraries
+        print("\nStopped.", flush=True)
+        sys.exit(0)
