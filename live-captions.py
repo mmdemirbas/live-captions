@@ -10,13 +10,6 @@ mic_device_name = "MacBook Pro Microphone"
 system_device_name = "BlackHole 2ch"
 
 
-# TODO: Add a good README doc (what is this, prerequisities etc)
-# TODO: Add preset profiles
-# TODO: --source: Support specifying a file as input?
-# TODO: --target: Improve output representation (e.g., file output (SRT etc.), screen overlay, etc.)
-# TODO: Improve output details (e.g., timestamps, confidence scores, etc.)
-# TODO: Minimize resampling cost: If the device can be opened at 16 kHz, do so and skip resample.
-
 def main():
     # ── PARSE CLI ARGUMENTS ───────────────────────────────────────────────────────────────────────
     default_model = "medium.en"
@@ -50,8 +43,8 @@ def main():
         speech_threshold = 2
         end_silence = 200  # 150–250 ms is a good range; below ~150 ms you risk cutting words
         beam_size = 4  # 1-3 for real-time; 5+ for harder audio, but it’ll add delay
-        frame_size = 20  # 20 ms (more frequent decisions) if CPU allows. 10 ms increases overhead
-        tail_padding = 100  # 80–120 ms helps avoid chopping final consonants
+        # frame_size = 20  # 20 ms (more frequent decisions) if CPU allows. 10 ms increases overhead
+        # tail_padding = 100  # 80–120 ms helps avoid chopping final consonants
 
     elif args.profile == "default" or args.profile is None:
         model = default_model
