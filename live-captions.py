@@ -122,17 +122,16 @@ def main():
         if mbp_mic_index is None:
             print(f"   mic : ⚠️ '{mic_device_name}' not found")
         else:
-            print(f"   mic : MBP microphone ({mbp_mic_index})")
+            print(f"   mic : {mic_device_name} ({mbp_mic_index})")
 
         if blackhole_index is None:
             print(
-                f"system : ⚠️ You need BlackHole to listen system audio – Follow README")
+                f"system : ⚠️ '{system_device_name}' not found. Follow README.")
         else:
-            print(f"system : BlackHole loop-back ({blackhole_index})")
+            print(f"system : {system_device_name} ({blackhole_index})")
 
         for d in input_devices:
-            if d["index"] not in (mbp_mic_index, blackhole_index):
-                print(f"{d['index']:>6} : {d['name']}")
+            print(f"{d['index']:>6} : {d['name']}")
         sys.exit(1)
 
     # Print the device name

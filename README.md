@@ -2,6 +2,8 @@
 
 <!-- TOC -->
 * [Live Captions](#live-captions)
+  * [Prerequisites](#prerequisites)
+    * [Setup Blackhole](#setup-blackhole)
   * [How does it work?](#how-does-it-work)
     * [Device selection](#device-selection)
     * [Audio capture](#audio-capture)
@@ -19,7 +21,6 @@
   * [Possible Use-Cases](#possible-use-cases)
     * [Overlay subtitles on videos](#overlay-subtitles-on-videos)
   * [TODO](#todo)
-    * [Setup Blackhole](#setup-blackhole)
     * [Consider named pipes (FIFO)](#consider-named-pipes-fifo)
     * [Incremental correction](#incremental-correction)
       * [How to correct past words](#how-to-correct-past-words)
@@ -35,6 +36,26 @@
       * [Batch inference and concurrency](#batch-inference-and-concurrency)
     * [Future modularization](#future-modularization)
 <!-- TOC -->
+
+Speech-to-text transcription in real-time, using a microphone or system audio loopback.
+
+## Prerequisites
+
+- Python 3.10+
+- A microphone (internal or external) or a loopback device like BlackHole to capture system audio.
+- Internet connection for downloading dependencies and models.
+
+### Setup Blackhole
+
+1. Install with `brew install blackhole-2ch`
+2. Reboot.
+3. Run `open -a "Audio MIDI Setup"`
+4. Add → Multi-Output Device
+5. Tick Built-in Output and BlackHole 2-ch
+6. Make this Multi-Output the system output → you still hear audio, BlackHole gets the same signal.
+7. Use `--source system` in the script to capture system audio.
+
+Alternatively, you can use `--source <index>` to specify a device index directly.
 
 ## How does it work?
 
@@ -133,15 +154,6 @@ You can overlay subtitle with mpv:
 mpv auto-reloads the SRT every few seconds; captions appear on-screen.
 
 ## TODO
-
-### Setup Blackhole
-
-1. Install with `brew install blackhole-2ch`
-2. Reboot.
-3. Run `open -a "Audio MIDI Setup"`
-4. Add → Multi-Output Device
-5. Tick Built-in Output and BlackHole 2-ch
-6. Make this Multi-Output the system output → you still hear audio, BlackHole gets the same signal.
 
 ### Consider named pipes (FIFO)
 
