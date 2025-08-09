@@ -12,7 +12,7 @@ sys_device_name = "BlackHole 2ch"
 
 
 def main():
-    # ── PARSE CLI ARGUMENTS ───────────────────────────────────────────────────────────────────────
+    # ── DEFAULT PARAMETERS ────────────────────────────────────────────────────────────────────────
 
     default_model = "medium.en"
     default_end_silence_ms = 260  # good range: 180–220 ms. Below ~150 ms often cut words. Above 250 ms feel less snappy.
@@ -20,6 +20,17 @@ def main():
     default_noise_gate_db = -52.0  # dBFS
     default_speech_threshold = 0  # 0=keeps more, 3=filters more
     default_beam_size = 3  # 1=fastest, 10=most accurate (higher is slower and more accurate)
+
+    frame_ms = 20  # quicker endpointing while keeping accuracy
+    lookback_ms = 320  # more pre-roll to avoid cutting word onsets
+    tail_ms = 260  # more tail to avoid chopping endings
+    consec_voiced_to_enter = 3  # sturdier start detection
+
+    # Adaptive noise floor (EMA) for dynamic gate
+    noise_floor_db = -60.0
+    _noise_alpha = 0.90  # higher = slower drift
+
+    # ── PARSE CLI ARGUMENTS ───────────────────────────────────────────────────────────────────────
 
     p = argparse.ArgumentParser(description="Live captions from mic or system audio.")
     p.add_argument("--source", type=str, help="mic | sys | device index")
@@ -152,7 +163,6 @@ def main():
     device_sr = int(sd.query_devices(device_index)["default_samplerate"])  # e.g. 48000
     target_sr = 16000  # Whisper/VAD rate
 
-    frame_ms = 30
     samples_per_frame_dev = int(device_sr * frame_ms / 1000)
     samples_per_frame_16k = int(target_sr * frame_ms / 1000)  # 480 at 16 kHz
     bytes_per_sample = 2  # int16
@@ -175,16 +185,10 @@ def main():
     in_speech = False
     silence_frames = 0
     segment_len_frames = 0
-    consec_voiced_to_enter = 1  # require 2 voiced frames to start
     enter_voiced_streak = 0
 
-    # Keep a small lookback/tail buffer (200 ms) in 16 kHz for context at segment start
-    lookback_ms = 200
     lookback_frames = lookback_ms // frame_ms
     lookback_16k = deque(maxlen=lookback_frames)
-
-    # Keep a small tail padding when segment ends
-    tail_ms = 200
     tail_frames = tail_ms // frame_ms
 
     # Accumulate voiced segment in 16 kHz float32
@@ -217,23 +221,49 @@ def main():
     def simple_noise_reduce(yf, sr=16000):
         return scipy.signal.lfilter([1, -0.97], [1], yf)  # high-pass at ~100 Hz
 
-    def vad_majority_3x10ms(yf: np.ndarray) -> bool:
-        # Split 30 ms (480 samples) into 3 chunks of 10 ms (160 samples)
-        chunk = samples_per_frame_16k // 3  # 160
-        votes = 0
-        for i in range(3):
-            sub = yf[i * chunk:(i + 1) * chunk]
-            y_i16 = (np.clip(sub, -1.0, 1.0) * 32768.0).astype(np.int16).tobytes()
-            if vad.is_speech(y_i16, target_sr):
-                votes += 1
-        return votes >= 2  # majority
+    def vad_vote(yf: np.ndarray) -> bool:
+        """
+        WebRTC VAD accepts only 10/20/30 ms frames at 16 kHz (160/320/480 samples).
+        For 20 ms frames, use either a single 20 ms check or 2×10 ms voting.
+        This implementation:
+          - 30 ms: majority(3 × 10 ms)
+          - 20 ms: both(2 × 10 ms)  # stricter; pair with energy gate below
+          - 10 ms: single check
+        """
+        n10 = target_sr // 100  # 160 samples
+        n = len(yf)
 
-    def is_voiced_30ms_16k(yf: np.ndarray, gate_db: float) -> bool:
-        # Require both VAD speech and energy above gate
-        yf_reduced = simple_noise_reduce(yf)
-        voiced = vad_majority_3x10ms(yf_reduced)
-        level_db = rms_dbfs(yf_reduced)
-        return voiced and (level_db >= gate_db)
+        def check(buf):
+            y_i16 = (np.clip(buf, -1.0, 1.0) * 32768.0).astype(np.int16).tobytes()
+            return vad.is_speech(y_i16, target_sr)
+
+        if n == 3 * n10:  # 30 ms
+            votes = sum(check(yf[i * n10:(i + 1) * n10]) for i in range(3))
+            return votes >= 2
+        if n == 2 * n10:  # 20 ms
+            return check(yf[:n10]) and check(yf[n10:2 * n10])
+        if n == n10:  # 10 ms
+            return check(yf)
+        # Fallback: truncate/pad to nearest 10 ms and do a single check
+        m = (n // n10) * n10 or n10
+        y = yf[:m] if n >= m else np.pad(yf, (0, m - n))
+        return check(y)
+
+    # ---- Simple DSP helpers (lightweight) ----
+    def pre_emphasis(yf: np.ndarray, coeff: float = 0.97) -> np.ndarray:
+        return np.append(yf[0], yf[1:] - coeff * yf[:-1])
+
+    def bandpass_100_7000(yf: np.ndarray, sr: int = 16000) -> np.ndarray:
+        b, a = scipy.signal.butter(2, [100 / (sr / 2), 7000 / (sr / 2)], btype="band")
+        # zero-phase to avoid phase distortion at boundaries
+        return scipy.signal.filtfilt(b, a, yf, method="gust")
+
+    def apply_agc(yf: np.ndarray, target_db: float = -20.0,
+                  max_gain_db: float = 12.0) -> np.ndarray:
+        level = rms_dbfs(yf)
+        gain_db = np.clip(target_db - level, -0.1, max_gain_db)
+        gain = 10 ** (gain_db / 20.0)
+        return np.clip(yf * gain, -1.0, 1.0)
 
     def callback(indata, _frames, _time, status):
         nonlocal dropped_frames, last_warn
@@ -298,13 +328,24 @@ def main():
                 frame_dev = bytes(buf[:frame_bytes_dev])
                 del buf[:frame_bytes_dev]
 
-                # Resample this frame to 16 kHz for VAD and model
+                # Resample this frame to 16 kHz, then light DSP for VAD+ASR
                 frame_16k = resample_16k_int16(frame_dev)
-                voiced = is_voiced_30ms_16k(frame_16k, args.noise_gate_db)
+                f = pre_emphasis(frame_16k)
+                f = bandpass_100_7000(f)
+                f = apply_agc(f)
+
+                # VAD + dynamic noise gate
+                vad_voiced = vad_vote(f)
+                level_db = rms_dbfs(f)
+                if not vad_voiced:
+                    noise_floor_db = (_noise_alpha * noise_floor_db) + (
+                            (1 - _noise_alpha) * level_db)
+                gate_db = max(args.noise_gate_db, noise_floor_db + 6.0)
+                voiced = vad_voiced and (level_db >= gate_db)
 
                 if not in_speech:
-                    # Keep rolling lookback
-                    lookback_16k.append(frame_16k)
+                    # Keep rolling lookback (use processed audio for ASR too)
+                    lookback_16k.append(f)
                     if voiced:
                         # Enter speech: prepend lookback for breathing room/context
                         enter_voiced_streak += 1
@@ -319,14 +360,14 @@ def main():
                 else:
                     segment_len_frames += 1
                     if voiced:
-                        current_segment_16k.append(frame_16k)
+                        current_segment_16k.append(f)  # append processed frame
                         silence_frames = 0
                         trailing_tail_needed = tail_frames
                     else:
                         silence_frames += 1
                         # Add a few silent frames as tail padding (to avoid cutting consonants)
                         if 'trailing_tail_needed' in locals() and trailing_tail_needed > 0:
-                            current_segment_16k.append(frame_16k)
+                            current_segment_16k.append(f)  # keep processed tail
                             trailing_tail_needed -= 1
 
                     # End on silence OR force flush on long segments
@@ -342,11 +383,14 @@ def main():
                                 segments, _ = model.transcribe(
                                     seg,
                                     beam_size=args.beam_size,
-                                    temperature=0.1,
-                                    vad_filter=False,
+                                    temperature=0.0,
+                                    vad_filter=False,  # keep our own VAD; True for extra trimming
                                     word_timestamps=False,
-                                    language="en"
+                                    language="en",
+                                    task="transcribe",
+                                    condition_on_previous_text=False,
                                 )
+
                                 if args.timestamps:
                                     now_ts = time.strftime("%H:%M:%S")
                                     for s in segments:
